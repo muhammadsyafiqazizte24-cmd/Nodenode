@@ -1,0 +1,10 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Serial Monitor",
+			"type": "shell",
+			"command": "C:\\Users\\Dafi Rizky Mulya\\.platformio\\penv\\Scripts\\platformio.exe device monitor --project-dir \"C:\\Users\\Dafi Rizky Mulya\\Documents\\PlatformIO\\Projects\\NodeNode\" -b 115200"
+		}
+	]
+}
