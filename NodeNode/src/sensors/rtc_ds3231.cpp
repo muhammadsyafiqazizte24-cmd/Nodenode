@@ -70,6 +70,19 @@ void setDate(uint16_t year, uint8_t month, uint8_t day) {
     rtc_year = year; rtc_month = month; rtc_day = day;
 }
 
+bool syncNtp() {
+    configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+
+    struct tm t;
+    if (!getLocalTime(&t, NTP_SYNC_TIMEOUT_MS)) {
+        return false;
+    }
+
+    setDate(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+    setTime(t.tm_hour, t.tm_min, t.tm_sec);
+    return true;
+}
+
 void sync() {
     xSemaphoreTake(i2cMutex, portMAX_DELAY);
     rtc_ss = bcd2dec(readReg(0x00) & 0x7F);
@@ -117,6 +130,21 @@ uint32_t getEpochSeconds() {
     return (uint32_t)epoch;
 }
 
+uint64_t getEpochMillis() {
+    uint8_t hh, mm, ss; uint16_t ms;
+    interpolatedTime(hh, mm, ss, ms);
+
+    struct tm t = {};
+    t.tm_year = rtc_year - 1900;
+    t.tm_mon  = rtc_month - 1;
+    t.tm_mday = rtc_day;
+    t.tm_hour = hh;
+    t.tm_min  = mm;
+    t.tm_sec  = ss;
+    time_t epoch = mktime(&t);
+    return ((uint64_t)epoch) * 1000ULL + ms;
+}
+
 void getTimestampString(char* buf, size_t buflen) {
     uint8_t hh, mm, ss; uint16_t ms;
     interpolatedTime(hh, mm, ss, ms);
@@ -126,7 +154,7 @@ void getTimestampString(char* buf, size_t buflen) {
 void getDateTimeString(char* buf, size_t buflen) {
     uint8_t hh, mm, ss; uint16_t ms;
     interpolatedTime(hh, mm, ss, ms);
-    snprintf(buf, buflen, "%04u-%02u-%02uT%02u:%02u:%02u.%03u",
+    snprintf(buf, buflen, "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
              rtc_year, rtc_month, rtc_day, hh, mm, ss, ms);
 }
 

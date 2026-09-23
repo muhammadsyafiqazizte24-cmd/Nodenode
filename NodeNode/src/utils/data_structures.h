@@ -30,6 +30,8 @@ struct MPU9250Data {
     float dt;
     // Sequence number untuk tracking pengiriman & sinkronisasi SD->MQTT
     uint32_t sequence;
+    // Epoch millis untuk timestamp presisi tinggi (FDD sync)
+    uint64_t epoch_ms;
 };
 
 // ---------------------------------------------------------------------------
@@ -51,6 +53,13 @@ struct ProcessedData {
     // perhitungan Kalman/RMS/FFT (hanya snapshot untuk display).
     float accel_x, accel_y, accel_z;
     float gyro_x, gyro_y, gyro_z;
+    // Calibrated accel (g) — hasil koreksi offset/skala
+    bool accel_calibrated;
+    float accel_x_cal, accel_y_cal, accel_z_cal;
+    // Calibration info untuk payload
+    uint8_t calibration_version;
+    float accel_offset[3];
+    float accel_scale[3];
 };
 
 // ---------------------------------------------------------------------------
@@ -64,7 +73,8 @@ enum class ConfigCommandType : uint8_t {
     SET_SENSITIVITY_GAIN,
     RECALIBRATE,
     RESTART,
-    REQUEST_STATUS
+    REQUEST_STATUS,
+    CALIBRATE_ACCEL
 };
 
 struct ConfigCommand {

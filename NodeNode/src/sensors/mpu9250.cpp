@@ -2,6 +2,8 @@
 #include "mpu9250_registers.h"
 #include "../config/config.h"
 #include "../utils/spi_manager.h"
+#include <nvs_flash.h>
+#include <nvs.h>
 
 namespace mpu9250 {
 
@@ -13,6 +15,16 @@ static float gyro_bias_x = 0.0f, gyro_bias_y = 0.0f, gyro_bias_z = 0.0f;
 static float accel_scale = 16.0f / 32768.0f;   // berubah saat setSensitivityGain
 static const float gyro_scale  = 2000.0f / 32768.0f;
 static bool calibrating = false;
+
+// Kalibrasi accelerometer (offset + skala per sumbu)
+static float accel_offset_x = 0.0f, accel_offset_y = 0.0f, accel_offset_z = 0.0f;
+static float accel_scale_cal_x = 1.0f, accel_scale_cal_y = 1.0f, accel_scale_cal_z = 1.0f;
+static bool accel_calibrated = false;
+
+// NVS key untuk kalibrasi accel
+static const char* NVS_NAMESPACE = "mpu9250";
+static const char* NVS_KEY_OFFSET = "accel_off";
+static const char* NVS_KEY_SCALE = "accel_scl";
 
 // ==================== SPI LOW-LEVEL ====================
 // Bus SPI dipakai BERSAMA dengan SD Card (satu bus VSPI global, lihat
@@ -95,6 +107,9 @@ bool init() {
     writeRegister(REG_ACCEL_CONFIG2, 0x03); delay(10); // DLPF accel
     writeRegister(REG_CONFIG, 0x03); delay(10);        // DLPF gyro
 
+    // Muat kalibrasi accel dari NVS jika ada
+    loadAccelCalibration();
+
     return true;
 }
 
@@ -127,6 +142,125 @@ void calibrateGyro(uint16_t samples) {
     calibrating = false;
 }
 
+// ==================== ACCEL CALIBRATION ====================
+void loadAccelCalibration() {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        accel_calibrated = false;
+        return;
+    }
+
+    uint8_t offset_buf[12];
+    size_t offset_len = sizeof(offset_buf);
+    err = nvs_get_blob(handle, NVS_KEY_OFFSET, offset_buf, &offset_len);
+    if (err == ESP_OK && offset_len == 12) {
+        memcpy(&accel_offset_x, offset_buf, 4);
+        memcpy(&accel_offset_y, offset_buf + 4, 4);
+        memcpy(&accel_offset_z, offset_buf + 8, 4);
+    }
+
+    uint8_t scale_buf[12];
+    size_t scale_len = sizeof(scale_buf);
+    err = nvs_get_blob(handle, NVS_KEY_SCALE, scale_buf, &scale_len);
+    if (err == ESP_OK && scale_len == 12) {
+        memcpy(&accel_scale_cal_x, scale_buf, 4);
+        memcpy(&accel_scale_cal_y, scale_buf + 4, 4);
+        memcpy(&accel_scale_cal_z, scale_buf + 8, 4);
+        accel_calibrated = true;
+    }
+
+    nvs_close(handle);
+}
+
+static void saveAccelCalibration() {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return;
+
+    uint8_t offset_buf[12];
+    memcpy(offset_buf, &accel_offset_x, 4);
+    memcpy(offset_buf + 4, &accel_offset_y, 4);
+    memcpy(offset_buf + 8, &accel_offset_z, 4);
+    nvs_set_blob(handle, NVS_KEY_OFFSET, offset_buf, 12);
+
+    uint8_t scale_buf[12];
+    memcpy(scale_buf, &accel_scale_cal_x, 4);
+    memcpy(scale_buf + 4, &accel_scale_cal_y, 4);
+    memcpy(scale_buf + 8, &accel_scale_cal_z, 4);
+    nvs_set_blob(handle, NVS_KEY_SCALE, scale_buf, 12);
+
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+// Kalibrasi accel offset (coarse, leveling) dengan asumsi node terpasang
+// datar (Z vertikal). Baca N sample diam, offset = mean - (0,0,1g).
+bool calibrateAccel() {
+    calibrating = true;
+
+    // Untuk implementasi penuh 6-posisi diperlukan interaksi operator.
+    // Di sini kita implementasikan kalibrasi offset saja (asumsi skala = 1).
+    // Baca 500 sample saat diam untuk estimasi offset.
+    const uint16_t samples = 500;
+    float sum_x = 0, sum_y = 0, sum_z = 0;
+
+    Serial.println("[CAL] Kalibrasi accel (offset)...");
+    for (uint16_t i = 0; i < samples; i++) {
+        int16_t ax, ay, az;
+        readAccelRaw(ax, ay, az);
+        sum_x += ax;
+        sum_y += ay;
+        sum_z += az;
+        delay(4);  // ~250 Hz
+    }
+
+    // Offset = mean - expected (asumsi Z = 1g, X = Y = 0)
+    accel_offset_x = (sum_x / samples) * accel_scale;  // harus 0
+    accel_offset_y = (sum_y / samples) * accel_scale;  // harus 0
+    accel_offset_z = (sum_z / samples) * accel_scale - 1.0f;  // harus 1g
+
+    accel_scale_cal_x = 1.0f;
+    accel_scale_cal_y = 1.0f;
+    accel_scale_cal_z = 1.0f;
+
+    accel_calibrated = true;
+    saveAccelCalibration();
+
+    Serial.printf("[CAL] Accel offset: X=%.4f Y=%.4f Z=%.4f g\n",
+                  accel_offset_x, accel_offset_y, accel_offset_z);
+
+    calibrating = false;
+    return true;
+}
+
+bool isAccelCalibrated() {
+    return accel_calibrated;
+}
+
+void getAccelCalibration(float& off_x, float& off_y, float& off_z,
+                         float& scale_x, float& scale_y, float& scale_z) {
+    off_x = accel_offset_x;
+    off_y = accel_offset_y;
+    off_z = accel_offset_z;
+    scale_x = accel_scale_cal_x;
+    scale_y = accel_scale_cal_y;
+    scale_z = accel_scale_cal_z;
+}
+
+void applyAccelCalibration(float raw_x, float raw_y, float raw_z,
+                           float& cal_x, float& cal_y, float& cal_z) {
+    if (!accel_calibrated) {
+        cal_x = raw_x;
+        cal_y = raw_y;
+        cal_z = raw_z;
+        return;
+    }
+    cal_x = (raw_x - accel_offset_x) / accel_scale_cal_x;
+    cal_y = (raw_y - accel_offset_y) / accel_scale_cal_y;
+    cal_z = (raw_z - accel_offset_z) / accel_scale_cal_z;
+}
+
 // ==================== SENSITIVITY GAIN (full-scale akselerometer) ====================
 // gain 1/2/4/8 -> AFS_SEL 0/1/2/3 -> +/-2/+/-4/+/-8/+/-16 g. accel_scale diubah
 // supaya konversi ADC->g tetap benar (PERTAHANKAN pembagian 32768). Dipanggil
@@ -136,6 +270,13 @@ void setSensitivityGain(uint8_t gain) {
     uint8_t afs = (gain == 1) ? 0 : (gain == 2) ? 1 : (gain == 4) ? 2 : 3;
     writeRegister(REG_ACCEL_CONFIG, (afs << 3) & 0x18);
     accel_scale = (2.0f * gain) / 32768.0f;
+}
+
+// ==================== READ RAW ACCEL ====================
+void readAccelRaw(int16_t& ax, int16_t& ay, int16_t& az) {
+    ax = read16(REG_ACCEL_XOUT_H);
+    ay = read16(REG_ACCEL_XOUT_H + 2);
+    az = read16(REG_ACCEL_XOUT_H + 4);
 }
 
 // ==================== READ ACCEL + GYRO (PERTAHANKAN logic) ====================

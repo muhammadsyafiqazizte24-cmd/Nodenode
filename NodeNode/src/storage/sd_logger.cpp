@@ -82,6 +82,10 @@ static bool openForAppend() {
     currentFile = SD.open(currentFileName, FILE_APPEND);
     endSDAccess();
 
+    if (!currentFile) {
+        Serial.printf("[SD] Gagal buka %s (disk/SPI error?)\n", currentFileName);
+        sd_ready = false;   // tandai down supaya checkRecovery() mencoba re-init
+    }
     fileOpenedAtMs = millis();
     return (bool)currentFile;
 }
@@ -104,7 +108,9 @@ bool init() {
     // SPI.begin() lagi.
     bool mounted = SD.begin(SD_CS_PIN, SPI, 1000000U);
     if (mounted && !SD.exists(SD_LOG_DIR)) {
-        SD.mkdir(SD_LOG_DIR);
+        if (!SD.mkdir(SD_LOG_DIR)) {
+            Serial.printf("[SD] mkdir %s gagal\n", SD_LOG_DIR);
+        }
     }
     endSDAccess();
 
@@ -115,7 +121,26 @@ bool init() {
         sd_ready = openForAppend();
     }
     lastFlushMs = millis();
+
+    if (!sd_ready) {
+        Serial.println("[SD] init gagal - mode degraded (MQTT tetap jalan, log SD nonaktif)");
+    }
     return sd_ready;
+}
+
+// Panggil periodik dari task_sd_writer: kalau SD sebelumnya down, coba re-init
+// (mis. power sag / kartu flaky) supaya logging pulih tanpa restart node.
+void checkRecovery() {
+    if (sd_ready) return;
+    static unsigned long lastRetryMs = 0;
+    unsigned long now = millis();
+    if (now - lastRetryMs < SD_RETRY_INTERVAL_MS) return;
+    lastRetryMs = now;
+
+    Serial.println("[SD] Mencoba re-init kartu...");
+    if (init()) {
+        Serial.println("[SD] Pulih - logging dilanjutkan.");
+    }
 }
 
 bool isReady() { return sd_ready; }
@@ -236,6 +261,49 @@ bool readNextUnsent(uint32_t afterSequence, SDRecord& outRec) {
 
     xSemaphoreGive(sdFileMutex);
     return found;
+}
+
+// ---- Checkpoint sync (sequence terakhir terkirim) ----
+// File kecil /shm_logs/checkpoint.dat; akses WAJIB lewat begin/endSDAccess
+// supaya terlindungi spiMutex + MPU_CS HIGH (tidak seperti akses SD langsung
+// di sync_manager.cpp yang dulu menyebabkan bus contention -> "Check status
+// failed").
+bool readCheckpoint(uint32_t& outSeq) {
+    if (!sd_ready) return false;
+
+    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+    if (!beginSDAccess()) { xSemaphoreGive(sdFileMutex); return false; }
+
+    File f = SD.open(SD_CHECKPOINT_FILE, FILE_READ);
+    bool ok = false;
+    if (f) {
+        if (f.available() >= (int)sizeof(uint32_t)) {
+            f.read((uint8_t*)&outSeq, sizeof(uint32_t));
+            ok = true;
+        }
+        f.close();
+    }
+    endSDAccess();
+    xSemaphoreGive(sdFileMutex);
+    return ok;
+}
+
+bool writeCheckpoint(uint32_t seq) {
+    if (!sd_ready) return false;
+
+    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+    if (!beginSDAccess()) { xSemaphoreGive(sdFileMutex); return false; }
+
+    File f = SD.open(SD_CHECKPOINT_FILE, FILE_WRITE);
+    bool ok = false;
+    if (f) {
+        f.seek(0);
+        ok = (f.write((const uint8_t*)&seq, sizeof(uint32_t)) == sizeof(uint32_t));
+        f.close();
+    }
+    endSDAccess();
+    xSemaphoreGive(sdFileMutex);
+    return ok;
 }
 
 } // namespace sdlog

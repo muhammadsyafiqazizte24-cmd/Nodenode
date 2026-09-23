@@ -51,6 +51,7 @@ extern volatile bool     g_recalibrateRequested;    // di-set true oleh config h
                                                       // dibaca & di-clear oleh processing task
 extern volatile bool     g_restartRequested;
 extern volatile bool     g_statusRequested;
+extern volatile bool     g_calibrateAccelRequested;
 
 // ---------------------------------------------------------------------------
 // STATISTIK (untuk payload status / watchdog monitoring)

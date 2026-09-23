@@ -16,11 +16,14 @@
 // ---------------------------------------------------------------------------
 // Identitas Node
 // ---------------------------------------------------------------------------
-// Unique ID per node — WAJIB diubah per unit saat deployment (bisa juga
-// dibuat dari MAC address di runtime jika ingin otomatis, tapi default
-// eksplisit lebih mudah ditelusuri saat maintenance lapangan).
-// Untuk sinkron dengan backend SHMS, gunakan nilai node_01 atau node_02.
+// Unique ID per node — nilai default (fallback) di bawah. Saat deployment,
+// override lewat build flag per environment di platformio.ini:
+//   pio run -e node_01 --target upload   (NODE_ID = node_01)
+//   pio run -e node_02 --target upload   (NODE_ID = node_02)
+// Gunakan nilai node_01 atau node_02 agar sinkron dengan backend SHMS.
+#ifndef NODE_ID
 #define NODE_ID "node_01"
+#endif
 
 // ---------------------------------------------------------------------------
 // SPI bus GLOBAL TUNGGAL — dipakai bersama oleh MPU9250 dan SD Card.
@@ -43,6 +46,13 @@
 #define RTC_SDA_PIN    21
 #define RTC_SCL_PIN    22
 #define RTC_SYNC_INTERVAL_MS 1000UL
+
+// Sinkronisasi waktu via NTP saat WiFi connect. DS3231 diset ke UTC (offset 0)
+// supaya timestamp payload konsisten dengan backend/frontend yang memakai UTC.
+#define NTP_SERVER            "pool.ntp.org"
+#define NTP_GMT_OFFSET_SEC    0
+#define NTP_DAYLIGHT_OFFSET_SEC 0
+#define NTP_SYNC_TIMEOUT_MS   15000UL
 
 // ---------------------------------------------------------------------------
 // Sampling & filter (PERTAHANKAN nilai kalibrasi/kalman dari referensi;
@@ -88,7 +98,7 @@
 // ---------------------------------------------------------------------------
 // MQTT publish periodik (pitch/roll/rms)
 // ---------------------------------------------------------------------------
-#define MQTT_PUBLISH_INTERVAL_DEFAULT_MS  1000UL
+#define MQTT_PUBLISH_INTERVAL_DEFAULT_MS  500UL
 #define MQTT_PUBLISH_INTERVAL_MIN_MS      500UL
 #define MQTT_PUBLISH_INTERVAL_MAX_MS      10000UL
 
@@ -99,6 +109,7 @@
 #define SD_FLUSH_INTERVAL_MS    500UL    // atau setiap 500ms, mana lebih dulu
 #define SD_FILE_ROTATE_INTERVAL_MS  (60UL * 60UL * 1000UL)  // 1 jam
 #define SD_FILE_ROTATE_MAX_BYTES    (10UL * 1024UL * 1024UL) // 10MB
+#define SD_RETRY_INTERVAL_MS        30000UL                   // re-init tiap 30 dtk saat SD down
 #define SD_LOG_DIR               "/shm_logs"
 #define SD_CHECKPOINT_FILE       "/shm_logs/checkpoint.dat"
 

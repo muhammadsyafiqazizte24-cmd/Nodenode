@@ -31,8 +31,10 @@ bool isConnected();
 // bertanggung jawab tetap menulis ke SD terlepas dari hasil ini.
 bool publishPeriodic(const ProcessedData& data);
 
-// Publish raw FFT window.
-bool publishFFTWindow(const float* window, uint16_t window_size, uint32_t timestamp);
+// Publish raw FFT window dengan timestamp presisi.
+bool publishFFTWindow(const float* window, uint16_t window_size,
+                      uint16_t sampling_rate_hz,
+                      uint64_t window_start_ms, uint64_t window_end_ms);
 
 // Publish balasan request_status.
 bool publishStatus(uint32_t uptime_s, uint32_t free_heap, int8_t wifi_rssi,

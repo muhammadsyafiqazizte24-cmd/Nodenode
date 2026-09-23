@@ -1,6 +1,6 @@
 #JALANIN NYA KETIK INI DI TERMINAL YAAA .\push.ps1
 
-$ProjectPath = "C:\Users\Syafiq\Documents\College\SIMON BATAPA\NodeNode"
+$ProjectPath = D:\Politeknik Negeri Jakarta\= SHM, SIMON BATAPA\Nodenode
 
 Set-Location $ProjectPath
 

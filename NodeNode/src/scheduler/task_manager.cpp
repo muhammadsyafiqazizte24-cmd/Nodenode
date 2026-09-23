@@ -37,6 +37,7 @@ volatile uint32_t g_fftSendIntervalMs = FFT_SEND_INTERVAL_DEFAULT_MS;
 volatile bool     g_recalibrateRequested = false;
 volatile bool     g_restartRequested = false;
 volatile bool     g_statusRequested = false;
+volatile bool     g_calibrateAccelRequested = false;
 
 volatile uint32_t g_sequenceCounter = 0;
 volatile uint32_t g_droppedSamples = 0;
@@ -80,6 +81,7 @@ static void task_sensor_sampling(void* pv) {
         sample.timestamp = rtc::getEpochSeconds();
         sample.dt = dt;
         sample.sequence = g_sequenceCounter++;
+        sample.epoch_ms = rtc::getEpochMillis();
 
         if (xQueueSend(rawDataQueue, &sample, 0) != pdTRUE) {
             g_droppedSamples++;   // queue penuh -> processing task tertinggal
@@ -110,6 +112,12 @@ static void task_data_processing(void* pv) {
                 g_recalibrateRequested = false;
             }
 
+            // ---- Handle accel calibration request ----
+            if (g_calibrateAccelRequested) {
+                mpu9250::calibrateAccel();
+                g_calibrateAccelRequested = false;
+            }
+
             // ---- Orientasi mentah dari accelerometer (simetris, stabil) ----
             float accel_pitch = atan2f(-sample.accel_x,
                                         sqrtf(sample.accel_y * sample.accel_y +
@@ -136,8 +144,22 @@ static void task_data_processing(void* pv) {
 
             // ---- Raw FFT buffer feed (axis Z untuk getaran vertikal) ----
             if (xSemaphoreTake(fftBufferMutex, 0) == pdTRUE) {
-                fftBuffer.addSample(sample.accel_z - 1.0f);   // gravitasi dihilangkan
+                fftBuffer.addSample(sample.accel_z - 1.0f, sample.epoch_ms);   // gravitasi dihilangkan
                 xSemaphoreGive(fftBufferMutex);
+            }
+
+            // ---- Ambil kalibrasi accel untuk payload ----
+            float accel_off[3] = {0, 0, 0}, accel_scl[3] = {1, 1, 1};
+            bool has_cal = mpu9250::isAccelCalibrated();
+            if (has_cal) {
+                mpu9250::getAccelCalibration(accel_off[0], accel_off[1], accel_off[2],
+                                              accel_scl[0], accel_scl[1], accel_scl[2]);
+            }
+
+            float ax_cal = 0, ay_cal = 0, az_cal = 0;
+            if (has_cal) {
+                mpu9250::applyAccelCalibration(sample.accel_x, sample.accel_y, sample.accel_z,
+                                               ax_cal, ay_cal, az_cal);
             }
 
             ProcessedData pd;
@@ -156,6 +178,19 @@ static void task_data_processing(void* pv) {
             pd.gyro_x = sample.gyro_x;
             pd.gyro_y = sample.gyro_y;
             pd.gyro_z = sample.gyro_z;
+            // Calibrated accel
+            pd.accel_calibrated = has_cal;
+            pd.accel_x_cal = ax_cal;
+            pd.accel_y_cal = ay_cal;
+            pd.accel_z_cal = az_cal;
+            // Calibration info
+            pd.calibration_version = has_cal ? 1 : 0;
+            pd.accel_offset[0] = accel_off[0];
+            pd.accel_offset[1] = accel_off[1];
+            pd.accel_offset[2] = accel_off[2];
+            pd.accel_scale[0] = accel_scl[0];
+            pd.accel_scale[1] = accel_scl[1];
+            pd.accel_scale[2] = accel_scl[2];
 
             // Fan-out ke SD Writer & MQTT Publisher (non-blocking; jika
             // salah satu queue penuh, task tersebut sedang tertinggal —
@@ -188,6 +223,7 @@ static void task_sd_writer(void* pv) {
             sdlog::writeRecord(rec);
         }
         sdlog::checkRotation();
+        sdlog::checkRecovery();
         esp_task_wdt_reset();
     }
 }
@@ -246,26 +282,32 @@ static void task_wifi_mqtt_reconnect(void* pv) {
 // ============================================================================
 static void task_fft_buffer_sender(void* pv) {
     static float window[FFTBuffer::BUFFER_SIZE];
-    TickType_t lastSend = xTaskGetTickCount();
+    uint64_t lastSlot = 0;
 
     for (;;) {
         uint32_t interval = g_fftSendIntervalMs;
         if (interval < FFT_SEND_INTERVAL_MIN_MS) interval = FFT_SEND_INTERVAL_MIN_MS;
         if (interval > FFT_SEND_INTERVAL_MAX_MS) interval = FFT_SEND_INTERVAL_MAX_MS;
 
-        if ((xTaskGetTickCount() - lastSend) >= pdMS_TO_TICKS(interval)) {
+        // Kirim sekali per slot epoch (now/interval) supaya node_01 & node_02
+        // mengirim pada boundary waktu yang sama BILA RTC keduanya sinkron,
+        // sehingga window raw lebih mudah disejajarkan untuk FDD.
+        uint64_t nowMs = rtc::getEpochMillis();
+        uint64_t slot = nowMs / interval;
+        if (slot != lastSlot) {
+            lastSlot = slot;
             bool got = false;
+            uint64_t start_ms = 0, end_ms = 0;
             if (xSemaphoreTake(fftBufferMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                got = fftBuffer.getBuffer(window);
+                got = fftBuffer.getBuffer(window, start_ms, end_ms);
                 xSemaphoreGive(fftBufferMutex);
             }
             if (got && mqttmgr::isConnected()) {
-                mqttmgr::publishFFTWindow(window, FFTBuffer::BUFFER_SIZE, rtc::getEpochSeconds());
+                mqttmgr::publishFFTWindow(window, FFTBuffer::BUFFER_SIZE, g_samplingRateHz, start_ms, end_ms);
             }
-            lastSend = xTaskGetTickCount();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -309,6 +351,9 @@ static void task_config_handler(void* pv) {
                     break;
                 case ConfigCommandType::REQUEST_STATUS:
                     g_statusRequested = true;
+                    break;
+                case ConfigCommandType::CALIBRATE_ACCEL:
+                    g_calibrateAccelRequested = true;
                     break;
             }
         }
@@ -366,6 +411,9 @@ static void task_serial_debug(void* pv) {
             } else if (cmdline == "recalibrate") {
                 g_recalibrateRequested = true;
                 Serial.println("[CMD] recalibrate requested");
+            } else if (cmdline == "cal_accel") {
+                g_calibrateAccelRequested = true;
+                Serial.println("[CMD] accel calibration requested");
             } else if (cmdline.startsWith("rate ")) {
                 g_samplingRateHz = (uint16_t)cmdline.substring(5).toInt();
                 Serial.printf("[CMD] sampling rate -> %u Hz\n", g_samplingRateHz);

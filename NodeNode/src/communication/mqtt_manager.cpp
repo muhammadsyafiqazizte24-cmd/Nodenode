@@ -44,6 +44,8 @@ static void onMessage(char* topic, byte* payloadBytes, unsigned int length) {
         cmd.value = (uint32_t)atol(payloadStr);
     } else if (t == TOPIC_CMD_RECALIBRATE) {
         cmd.type = ConfigCommandType::RECALIBRATE;
+    } else if (t == TOPIC_CMD_CALIBRATE_ACCEL) {
+        cmd.type = ConfigCommandType::CALIBRATE_ACCEL;
     } else if (t == TOPIC_CMD_RESTART) {
         cmd.type = ConfigCommandType::RESTART;
     } else if (t == TOPIC_CMD_REQUEST_STATUS) {
@@ -118,16 +120,18 @@ void loop() {
 
 bool publishPeriodic(const ProcessedData& data) {
     if (!mqttClient.connected()) return false;
-    char buf[384];
+    static char buf[1024];   // static -> cukup utk JSON + calibration, tidak bebani stack task
     size_t len = payload::buildPeriodicPayload(data, wifimgr::isConnected(), buf, sizeof(buf));
-    if (len == 0) return false;
+    if (len == 0 || len >= sizeof(buf)) return false;
     return mqttClient.publish(TOPIC_DATA_PERIODIC, (const uint8_t*)buf, len, false);
 }
 
-bool publishFFTWindow(const float* window, uint16_t window_size, uint32_t timestamp) {
+bool publishFFTWindow(const float* window, uint16_t window_size,
+                      uint16_t sampling_rate_hz,
+                      uint64_t window_start_ms, uint64_t window_end_ms) {
     if (!mqttClient.connected()) return false;
     static char buf[4096];   // static -> tidak membebani stack task 8192-word
-    size_t len = payload::buildFFTPayload(window, window_size, timestamp, buf, sizeof(buf));
+    size_t len = payload::buildFFTPayload(window, window_size, sampling_rate_hz, window_start_ms, window_end_ms, buf, sizeof(buf));
     if (len == 0) return false;
     return mqttClient.publish(TOPIC_FFT_BUFFER, (const uint8_t*)buf, len, false);
 }

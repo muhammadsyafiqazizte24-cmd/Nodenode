@@ -46,6 +46,10 @@ namespace sdlog {
 // MQTT tetap jalan seperti biasa).
 bool init();
 
+// Re-init berkala saat SD down (dipanggil task_sd_writer) supaya logging
+// pulih sendiri tanpa restart node. No-op bila sd_ready masih true.
+void checkRecovery();
+
 // Tulis satu record ke buffer internal; buffer di-flush ke file otomatis
 // setiap SD_WRITE_BATCH_SIZE record ATAU setiap SD_FLUSH_INTERVAL_MS,
 // mana yang lebih dulu tercapai (dipanggil dari task_sd_writer).
@@ -64,6 +68,12 @@ void checkRotation();
 // number > `afterSequence`, dipanggil berulang sampai return false (habis).
 // `outRec` diisi record berikutnya yang sequence-nya lebih besar.
 bool readNextUnsent(uint32_t afterSequence, SDRecord& outRec);
+
+// Baca/tulis file checkpoint sync (sequence terakhir terkirim). WAJIB lewat
+// sini (bukan akses SD langsung) supaya terlindungi spiMutex + MPU_CS HIGH —
+// sama seperti operasi SD lain di modul ini.
+bool readCheckpoint(uint32_t& outSeq);
+bool writeCheckpoint(uint32_t seq);
 
 bool isReady();
 

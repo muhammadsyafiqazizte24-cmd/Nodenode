@@ -39,6 +39,7 @@ extern char mqttBroker[];   // dipopulate oleh WiFiManager, dipakai mqtt_manager
 #define TOPIC_CMD_RAW_WINDOW_INTERVAL  "bridge/" NODE_ID "/cmd/raw_window_interval"
 #define TOPIC_CMD_SENSITIVITY_GAIN     "bridge/" NODE_ID "/cmd/sensitivity_gain"
 #define TOPIC_CMD_RECALIBRATE          "bridge/" NODE_ID "/cmd/recalibrate"
+#define TOPIC_CMD_CALIBRATE_ACCEL      "bridge/" NODE_ID "/cmd/calibrate_accel"
 #define TOPIC_CMD_RESTART              "bridge/" NODE_ID "/cmd/restart"
 #define TOPIC_CMD_REQUEST_STATUS       "bridge/" NODE_ID "/cmd/request_status"
 

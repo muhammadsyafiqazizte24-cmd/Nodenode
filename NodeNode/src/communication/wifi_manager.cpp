@@ -195,6 +195,14 @@ void init() {
     Serial.printf("[WiFi] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
     saveConfigCallback();
 
+    // Sinkronisasi RTC ke UTC via NTP (sekali per boot; DS3231 lalu menjaga
+    // waktu via baterai). Gagal NTP tidak fatal — RTC pakai waktu lama.
+    if (rtc::syncNtp()) {
+        Serial.println("[RTC] NTP sync OK (UTC).");
+    } else {
+        Serial.println("[RTC] NTP sync GAGAL — pakai waktu RTC lama.");
+    }
+
     last_attempt_ms = millis();
     xEventGroupSetBits(netEventGroup, WIFI_CONNECTED_BIT);
 }

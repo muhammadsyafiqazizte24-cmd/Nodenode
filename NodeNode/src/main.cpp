@@ -71,6 +71,7 @@
 
 #include <Arduino.h>
 #include "esp_task_wdt.h"
+#include <nvs_flash.h>
 
 #include "config/config.h"
 #include "config/freertos_config.h"
@@ -108,6 +109,13 @@ void setup() {
     // WAJIB dipanggil sebelum mpu9250::init() maupun sdlog::init().
     spimgr::init();
     Serial.println("SPI bus (VSPI, shared MPU9250+SD) siap.");
+
+    // ---- NVS (untuk kalibrasi accel di mpu9250) ----
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
 
     // ---- RTC ----
     bool rtc_ok = rtc::init();

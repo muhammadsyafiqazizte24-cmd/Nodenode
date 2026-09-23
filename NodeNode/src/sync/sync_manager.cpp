@@ -1,5 +1,4 @@
 #include "sync_manager.h"
-#include <SD.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_task_wdt.h"
@@ -14,30 +13,17 @@ static uint32_t last_sent_sequence = 0;
 static uint32_t checkpoint_dirty_count = 0;
 
 uint32_t loadCheckpoint() {
-    if (!SD.exists(SD_CHECKPOINT_FILE)) {
+    uint32_t seq = 0;
+    if (!sdlog::readCheckpoint(seq)) {
         last_sent_sequence = 0;
         return 0;
     }
-
-    File f = SD.open(SD_CHECKPOINT_FILE, FILE_READ);
-    if (!f) { last_sent_sequence = 0; return 0; }
-
-    uint32_t seq = 0;
-    if (f.available() >= (int)sizeof(uint32_t)) {
-        f.read((uint8_t*)&seq, sizeof(uint32_t));
-    }
-    f.close();
-
     last_sent_sequence = seq;
     return seq;
 }
 
 void saveCheckpoint() {
-    File f = SD.open(SD_CHECKPOINT_FILE, FILE_WRITE);
-    if (!f) return;
-    f.seek(0);
-    f.write((const uint8_t*)&last_sent_sequence, sizeof(uint32_t));
-    f.close();
+    sdlog::writeCheckpoint(last_sent_sequence);
 }
 
 void markAsSent(uint32_t sequence) {
@@ -70,7 +56,10 @@ void syncAfterReconnect() {
            (millis() - start_ms) < max_time_ms &&
            sdlog::readNextUnsent(last_sent_sequence, rec)) {
 
-        ProcessedData pd;
+        // Zero-init supaya field accel/gyro/calibration pada replay TIDAK
+        // berisi nilai stack yang tidak valid (SDRecord tidak menyimpan
+        // kanal tersebut; replay hanya mengirim agregat pitch/roll/rms).
+        ProcessedData pd = {};
         pd.sequence = rec.sequence;
         pd.timestamp = rec.timestamp;
         pd.pitch = rec.pitch;

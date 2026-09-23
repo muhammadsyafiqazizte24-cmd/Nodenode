@@ -17,7 +17,8 @@ namespace payload {
 // { node_id, timestamp, sampling_rate_hz, connection_status, pitch, roll,
 //   pitch_delta, roll_delta, rms_vibration,
 //   magnetometer:{mag_x,mag_y,mag_z},
-//   accelerometer:{x,y,z}, gyroscope:{x,y,z} }
+//   accelerometer:{x,y,z}, accelerometer_calibrated:{x,y,z}, gyroscope:{x,y,z},
+//   calibration:{version,accel_offset:[],accel_scale:[]} }
 // Hasil ditulis ke `out` (buffer caller-provided), return panjang string
 // (atau 0 jika buffer kurang besar) — TANPA alokasi heap dinamis supaya
 // aman dipanggil berulang dari task MQTT Publisher 24/7.
@@ -25,9 +26,12 @@ size_t buildPeriodicPayload(const ProcessedData& data, bool wifi_connected,
                              char* out, size_t out_size);
 
 // Payload FFT buffer (dikirim tiap 10-30 detik):
-// { node_id, timestamp, raw_window: [...], window_size }
+// { node_id, timestamp, raw_accel:[...], window_size, sampling_rate_hz,
+//   window_start_ms, window_end_ms }
 size_t buildFFTPayload(const float* window, uint16_t window_size,
-                        uint32_t timestamp, char* out, size_t out_size);
+                        uint16_t sampling_rate_hz,
+                        uint64_t window_start_ms, uint64_t window_end_ms,
+                        char* out, size_t out_size);
 
 // Payload status (balasan request_status):
 // { node_id, uptime_s, free_heap, wifi_rssi, sd_ok, mqtt_ok, drop_rate }
