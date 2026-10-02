@@ -15,6 +15,7 @@ static uint8_t rtc_hh = 0, rtc_mm = 0, rtc_ss = 0;
 static uint16_t rtc_year = 2026;
 static uint8_t rtc_month = 1, rtc_day = 1;
 static unsigned long rtc_sync_micros = 0;
+static bool rtc_available = false;
 
 static uint8_t bcd2dec(uint8_t bcd) { return ((bcd >> 4) * 10) + (bcd & 0x0F); }
 static uint8_t dec2bcd(uint8_t dec) { return ((dec / 10) << 4) | (dec % 10); }
@@ -41,14 +42,32 @@ bool init() {
     }
 
     Wire.begin(RTC_SDA_PIN, RTC_SCL_PIN);
+    Wire.setTimeOut(25);
 
-    xSemaphoreTake(i2cMutex, portMAX_DELAY);
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        rtc_available = false;
+        return false;
+    }
+
+    Wire.beginTransmission(RTC_I2C_ADDR);
+    if (Wire.endTransmission() != 0) {
+        xSemaphoreGive(i2cMutex);
+        Serial.println("[RTC] DS3231 tidak merespons di bus I2C — fallback ke internal timer");
+        rtc_available = false;
+        return false;
+    }
+
     uint8_t status = readReg(0x0F);
     bool oscillator_ok = !(status & 0x80);   // OSF flag
     xSemaphoreGive(i2cMutex);
 
+    rtc_available = true;
     sync();
     return oscillator_ok;
+}
+
+bool isAvailable() {
+    return rtc_available;
 }
 
 void setTime(uint8_t hh, uint8_t mm, uint8_t ss) {
@@ -84,7 +103,11 @@ bool syncNtp() {
 }
 
 void sync() {
-    xSemaphoreTake(i2cMutex, portMAX_DELAY);
+    if (!rtc_available) return;
+
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
     rtc_ss = bcd2dec(readReg(0x00) & 0x7F);
     rtc_mm = bcd2dec(readReg(0x01) & 0x7F);
     rtc_hh = bcd2dec(readReg(0x02) & 0x3F);
@@ -116,6 +139,9 @@ static void interpolatedTime(uint8_t& hh, uint8_t& mm, uint8_t& ss, uint16_t& ms
 }
 
 uint32_t getEpochSeconds() {
+    if (!rtc_available) {
+        return (uint32_t)(millis() / 1000UL);
+    }
     uint8_t hh, mm, ss; uint16_t ms;
     interpolatedTime(hh, mm, ss, ms);
 
@@ -131,6 +157,9 @@ uint32_t getEpochSeconds() {
 }
 
 uint64_t getEpochMillis() {
+    if (!rtc_available) {
+        return (uint64_t)millis();
+    }
     uint8_t hh, mm, ss; uint16_t ms;
     interpolatedTime(hh, mm, ss, ms);
 
@@ -146,12 +175,24 @@ uint64_t getEpochMillis() {
 }
 
 void getTimestampString(char* buf, size_t buflen) {
+    if (!rtc_available) {
+        unsigned long s = millis() / 1000UL;
+        snprintf(buf, buflen, "%02lu:%02lu:%02lu.%03lu",
+                 (s / 3600UL) % 24, (s / 60UL) % 60, s % 60UL, millis() % 1000UL);
+        return;
+    }
     uint8_t hh, mm, ss; uint16_t ms;
     interpolatedTime(hh, mm, ss, ms);
     snprintf(buf, buflen, "%02u:%02u:%02u.%03u", hh, mm, ss, ms);
 }
 
 void getDateTimeString(char* buf, size_t buflen) {
+    if (!rtc_available) {
+        unsigned long s = millis() / 1000UL;
+        snprintf(buf, buflen, "2026-01-01T%02lu:%02lu:%02lu.%03luZ",
+                 (s / 3600UL) % 24, (s / 60UL) % 60, s % 60UL, millis() % 1000UL);
+        return;
+    }
     uint8_t hh, mm, ss; uint16_t ms;
     interpolatedTime(hh, mm, ss, ms);
     snprintf(buf, buflen, "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",

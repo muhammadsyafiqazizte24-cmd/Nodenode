@@ -2,48 +2,31 @@
 #include <SPI.h>
 #include <SD.h>
 #include "../config/config.h"
-#include "../sensors/rtc_ds3231.h"
 #include "../utils/spi_manager.h"
 #include "../scheduler/task_manager.h"
 
 // ============================================================================
-// sd_logger.cpp -- BUS SPI GLOBAL dipakai bersama dengan MPU9250 (satu bus
-// VSPI: SCK=18/MISO=23/MOSI=19, lihat utils/spi_manager.h). TIDAK ADA
-// SPIClass kedua (HSPI) di sini -- SD Card memakai objek `SPI` global yang
-// SAMA, yang sudah diinisialisasi oleh spimgr::init() (dipanggil sekali di
-// main.cpp SEBELUM mpu9250::init() maupun sdlog::init()).
-//
-// SETIAP operasi yang menyentuh SPI (SD.begin/open/exists/mkdir,
-// File.read/write/flush/close) WAJIB dibungkus spimgr::spiMutex, dengan
-// MPU_CS dipaksa HIGH (deselect) sebelum SD_CS di-LOW-kan. Ini mengikuti
-// pola CS-handling yang sama dengan mpu9250.cpp, hanya arah sebaliknya.
-//
-// sdFileMutex TETAP dipakai sebagai lapisan proteksi TERPISAH: ia menjaga
-// STATE internal modul ini (currentFile, writeBuffer, readFile) dari akses
-// bersamaan antar-task (SD Writer vs Sync Manager) -- bukan bus fisik.
-// Urutan locking selalu: sdFileMutex (outer) dulu, baru spiMutex (inner)
-// di dalamnya -- konsisten di semua fungsi untuk menghindari deadlock.
+// sd_logger.cpp -- Logging SD Card berbasis sesi pengujian.
+// SD Card hanya aktif menulis ketika ada sesi pengujian yang dimulai dari
+// server dashboard. Di luar sesi, SD Card IDLE 100% sehingga tidak menyita
+// bus SPI yang dipakai bersama dengan MPU9250.
 // ============================================================================
 
 namespace sdlog {
 
 static bool sd_ready = false;
+static bool sd_mounted = false;
+static bool session_active = false;
+static uint32_t current_session_id = 0;
+
 static File currentFile;
 static char currentFileName[64] = {0};
-static unsigned long fileOpenedAtMs = 0;
 
 static SDRecord writeBuffer[SD_WRITE_BATCH_SIZE];
 static uint8_t writeBufferCount = 0;
 static unsigned long lastFlushMs = 0;
 
-// ---- Read cursor state (dipakai SyncManager) ----
-static File readFile;
-static bool readCursorActive = false;
-
-// ---------------------------------------------------------------------------
-// Helper CS-handling untuk akses SD di bus bersama. Dipanggil SELALU
-// berpasangan, mengelilingi SETIAP operasi SD.*/File.* yang menyentuh SPI.
-// ---------------------------------------------------------------------------
+// Helper CS-handling untuk akses SD di bus bersama
 static bool beginSDAccess() {
     if (xSemaphoreTake(spimgr::spiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         Serial.println("[SD] SPI mutex timeout; skipping SD access");
@@ -60,36 +43,6 @@ static void endSDAccess() {
     xSemaphoreGive(spimgr::spiMutex);
 }
 
-static void buildFileName(char* out, size_t outsize) {
-    char dateStr[16];
-    rtc::getDateString(dateStr, sizeof(dateStr));
-    uint8_t hh = rtc::getHour();
-    snprintf(out, outsize, "%s/%s_%s_%02u.bin", SD_LOG_DIR, NODE_ID, dateStr, hh);
-}
-
-// Dipanggil HANYA dari dalam blok yang sudah memegang sdFileMutex.
-static bool openForAppend() {
-    char newName[64];
-    buildFileName(newName, sizeof(newName));
-
-    if (strcmp(newName, currentFileName) == 0 && currentFile) {
-        return true;   // masih file yang sama, tidak perlu buka ulang
-    }
-
-    if (!beginSDAccess()) return false;
-    if (currentFile) currentFile.close();
-    strncpy(currentFileName, newName, sizeof(currentFileName));
-    currentFile = SD.open(currentFileName, FILE_APPEND);
-    endSDAccess();
-
-    if (!currentFile) {
-        Serial.printf("[SD] Gagal buka %s (disk/SPI error?)\n", currentFileName);
-        sd_ready = false;   // tandai down supaya checkRecovery() mencoba re-init
-    }
-    fileOpenedAtMs = millis();
-    return (bool)currentFile;
-}
-
 bool init() {
     if (sdFileMutex == nullptr) {
         sdFileMutex = xSemaphoreCreateMutex();
@@ -99,14 +52,22 @@ bool init() {
         return false;
     }
 
+    if (sd_mounted) {
+        if (currentFile) currentFile.close();
+        currentFile = File();
+        currentFileName[0] = '\0';
+        writeBufferCount = 0;
+        SD.end();
+        sd_mounted = false;
+    }
+
     if (!beginSDAccess()) {
         xSemaphoreGive(sdFileMutex);
         return false;
     }
-    // SD.begin() memakai objek `SPI` GLOBAL yang sudah di-begin() oleh
-    // spimgr::init() -- TIDAK membuat SPIClass baru, TIDAK memanggil
-    // SPI.begin() lagi.
+
     bool mounted = SD.begin(SD_CS_PIN, SPI, 1000000U);
+    sd_mounted = mounted;
     if (mounted && !SD.exists(SD_LOG_DIR)) {
         if (!SD.mkdir(SD_LOG_DIR)) {
             Serial.printf("[SD] mkdir %s gagal\n", SD_LOG_DIR);
@@ -117,19 +78,17 @@ bool init() {
     xSemaphoreGive(sdFileMutex);
 
     sd_ready = mounted;
-    if (sd_ready) {
-        sd_ready = openForAppend();
-    }
+    session_active = false;
     lastFlushMs = millis();
 
-    if (!sd_ready) {
+    if (sd_ready) {
+        Serial.printf("[SD] Terdeteksi OK. Menunggu Start Session dari server. Folder: %s\n", SD_LOG_DIR);
+    } else {
         Serial.println("[SD] init gagal - mode degraded (MQTT tetap jalan, log SD nonaktif)");
     }
     return sd_ready;
 }
 
-// Panggil periodik dari task_sd_writer: kalau SD sebelumnya down, coba re-init
-// (mis. power sag / kartu flaky) supaya logging pulih tanpa restart node.
 void checkRecovery() {
     if (sd_ready) return;
     static unsigned long lastRetryMs = 0;
@@ -139,35 +98,101 @@ void checkRecovery() {
 
     Serial.println("[SD] Mencoba re-init kartu...");
     if (init()) {
-        Serial.println("[SD] Pulih - logging dilanjutkan.");
+        Serial.println("[SD] Pulih - siap untuk sesi.");
     }
 }
 
-bool isReady() { return sd_ready; }
+bool isReady() {
+    return sd_ready;
+}
 
-void flush() {
-    if (!sd_ready || writeBufferCount == 0) return;
+bool isSessionActive() {
+    return session_active;
+}
 
-    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+bool startSession(uint32_t sessionId) {
+    if (!sd_ready) return false;
+
+    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return false;
+    }
+
+    // Jika sudah ada sesi aktif sebelumnya, tutup dulu
+    if (currentFile) {
+        flush();
+        if (beginSDAccess()) {
+            currentFile.close();
+            endSDAccess();
+        }
+    }
+
+    current_session_id = sessionId;
+    snprintf(currentFileName, sizeof(currentFileName), "%s/session_%lu.bin", SD_LOG_DIR, (unsigned long)sessionId);
+
+    if (!beginSDAccess()) {
+        xSemaphoreGive(sdFileMutex);
+        return false;
+    }
+
+    currentFile = SD.open(currentFileName, FILE_WRITE);
+    endSDAccess();
+
+    session_active = (bool)currentFile;
+    writeBufferCount = 0;
+    lastFlushMs = millis();
+
+    xSemaphoreGive(sdFileMutex);
+
+    if (session_active) {
+        Serial.printf("[SD] Sesi %lu DIMULAI -> menulis ke %s\n", (unsigned long)sessionId, currentFileName);
+    } else {
+        Serial.printf("[SD] Gagal membuka file sesi: %s\n", currentFileName);
+    }
+    return session_active;
+}
+
+void stopSession() {
+    if (!session_active && !currentFile) return;
+
+    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        session_active = false;
         return;
     }
-    if (openForAppend()) {
-        if (!beginSDAccess()) {
-            xSemaphoreGive(sdFileMutex);
-            return;
+
+    // Flush sisa buffer yang belum ditulis
+    flush();
+
+    if (currentFile) {
+        if (beginSDAccess()) {
+            currentFile.close();
+            endSDAccess();
         }
-        currentFile.write((const uint8_t*)writeBuffer, sizeof(SDRecord) * writeBufferCount);
-        currentFile.flush();
-        endSDAccess();
+        currentFile = File();
     }
+
+    session_active = false;
+    writeBufferCount = 0;
     xSemaphoreGive(sdFileMutex);
+
+    Serial.printf("[SD] Sesi %lu SELESAI. File ditutup, SD Card IDLE.\n", (unsigned long)current_session_id);
+}
+
+void flush() {
+    if (!sd_ready || !currentFile || writeBufferCount == 0) return;
+
+    if (!beginSDAccess()) {
+        return;
+    }
+    currentFile.write((const uint8_t*)writeBuffer, sizeof(SDRecord) * writeBufferCount);
+    currentFile.flush();
+    endSDAccess();
 
     writeBufferCount = 0;
     lastFlushMs = millis();
 }
 
 void writeRecord(const SDRecord& rec) {
-    if (!sd_ready) return;
+    if (!sd_ready || !session_active) return;
 
     writeBuffer[writeBufferCount++] = rec;
 
@@ -175,135 +200,11 @@ void writeRecord(const SDRecord& rec) {
     bool timeUp = (millis() - lastFlushMs >= SD_FLUSH_INTERVAL_MS);
 
     if (batchFull || timeUp) {
-        flush();
-    }
-}
-
-void checkRotation() {
-    if (!sd_ready || !currentFile) return;
-
-    bool timeExceeded = (millis() - fileOpenedAtMs >= SD_FILE_ROTATE_INTERVAL_MS);
-
-    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return;
-    }
-
-    if (!beginSDAccess()) {
-        xSemaphoreGive(sdFileMutex);
-        return;
-    }
-    bool sizeExceeded = (currentFile.size() >= SD_FILE_ROTATE_MAX_BYTES);
-    endSDAccess();
-
-    if (timeExceeded || sizeExceeded) {
-        if (!beginSDAccess()) {
+        if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            flush();
             xSemaphoreGive(sdFileMutex);
-            return;
-        }
-        currentFile.close();
-        endSDAccess();
-
-        currentFileName[0] = '\0';   // paksa openForAppend() membuat/buka file baru
-        openForAppend();
-    }
-
-    xSemaphoreGive(sdFileMutex);
-}
-
-bool readNextUnsent(uint32_t afterSequence, SDRecord& outRec) {
-    if (!sd_ready) return false;
-
-    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return false;
-    }
-
-    if (!readCursorActive) {
-        if (!beginSDAccess()) {
-            xSemaphoreGive(sdFileMutex);
-            return false;
-        }
-        readFile = SD.open(currentFileName, FILE_READ);
-        endSDAccess();
-        readCursorActive = (bool)readFile;
-    }
-
-    if (!readCursorActive) {
-        xSemaphoreGive(sdFileMutex);
-        return false;
-    }
-
-    SDRecord rec;
-    bool found = false;
-
-    if (!beginSDAccess()) {
-        xSemaphoreGive(sdFileMutex);
-        return false;
-    }
-    while (readFile.available() >= (int)sizeof(SDRecord)) {
-        readFile.read((uint8_t*)&rec, sizeof(SDRecord));
-        if (rec.sequence > afterSequence) {
-            outRec = rec;
-            found = true;
-            break;
         }
     }
-    endSDAccess();
-
-    if (!found) {
-        if (!beginSDAccess()) {
-            xSemaphoreGive(sdFileMutex);
-            return false;
-        }
-        readFile.close();
-        endSDAccess();
-        readCursorActive = false;
-    }
-
-    xSemaphoreGive(sdFileMutex);
-    return found;
-}
-
-// ---- Checkpoint sync (sequence terakhir terkirim) ----
-// File kecil /shm_logs/checkpoint.dat; akses WAJIB lewat begin/endSDAccess
-// supaya terlindungi spiMutex + MPU_CS HIGH (tidak seperti akses SD langsung
-// di sync_manager.cpp yang dulu menyebabkan bus contention -> "Check status
-// failed").
-bool readCheckpoint(uint32_t& outSeq) {
-    if (!sd_ready) return false;
-
-    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
-    if (!beginSDAccess()) { xSemaphoreGive(sdFileMutex); return false; }
-
-    File f = SD.open(SD_CHECKPOINT_FILE, FILE_READ);
-    bool ok = false;
-    if (f) {
-        if (f.available() >= (int)sizeof(uint32_t)) {
-            f.read((uint8_t*)&outSeq, sizeof(uint32_t));
-            ok = true;
-        }
-        f.close();
-    }
-    endSDAccess();
-    xSemaphoreGive(sdFileMutex);
-    return ok;
-}
-
-bool writeCheckpoint(uint32_t seq) {
-    if (!sd_ready) return false;
-
-    if (xSemaphoreTake(sdFileMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
-    if (!beginSDAccess()) { xSemaphoreGive(sdFileMutex); return false; }
-
-    File f = SD.open(SD_CHECKPOINT_FILE, FILE_WRITE);
-    bool ok = false;
-    if (f) {
-        f.seek(0);
-        ok = (f.write((const uint8_t*)&seq, sizeof(uint32_t)) == sizeof(uint32_t));
-        f.close();
-    }
-    endSDAccess();
-    xSemaphoreGive(sdFileMutex);
-    return ok;
 }
 
 } // namespace sdlog

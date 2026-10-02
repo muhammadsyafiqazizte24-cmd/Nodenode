@@ -26,10 +26,13 @@ void loop();
 
 bool isConnected();
 
-// Publish payload periodik (pitch/roll/rms). Return false jika gagal
-// (misal MQTT sedang disconnect) — caller (MQTT Publisher task)
-// bertanggung jawab tetap menulis ke SD terlepas dari hasil ini.
-bool publishPeriodic(const ProcessedData& data);
+// Publish payload gabungan (pitch/roll/rms + 200 raw samples ax/ay/az)
+// ke topic bridge/<node_id>/data per 1 detik.
+bool publishPeriodic(const ProcessedData* batch, uint16_t batch_count,
+                      uint32_t boot_id, uint32_t packet_seq);
+
+// Overload untuk single ProcessedData (mis. saat sync replay dari SD)
+bool publishPeriodic(const ProcessedData& single);
 
 // Publish raw FFT window dengan timestamp presisi.
 bool publishFFTWindow(const float* window, uint16_t window_size,
@@ -39,6 +42,9 @@ bool publishFFTWindow(const float* window, uint16_t window_size,
 // Publish balasan request_status.
 bool publishStatus(uint32_t uptime_s, uint32_t free_heap, int8_t wifi_rssi,
                     bool sd_ok, float drop_rate_pct);
+
+// Publish konfirmasi perintah konfigurasi (FR-04)
+bool publishConfigAck(const char* param, uint32_t requested, uint32_t applied, const char* status);
 
 } // namespace mqttmgr
 

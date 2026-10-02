@@ -41,7 +41,9 @@ static const char* NVS_KEY_SCALE = "accel_scl";
 // mengunci & melepas mutex secara independen per transfer (bukan per
 // pemanggil level atas), sesuai desain SPI Manager terpusat.
 static uint8_t readRegister(uint8_t reg) {
-    xSemaphoreTake(spimgr::spiMutex, portMAX_DELAY);
+    if (xSemaphoreTake(spimgr::spiMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return 0;
+    }
 
     SPI.beginTransaction(SPISettings(MPU_SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
     digitalWrite(SD_CS_PIN, HIGH);
@@ -58,7 +60,9 @@ static uint8_t readRegister(uint8_t reg) {
 }
 
 static void writeRegister(uint8_t reg, uint8_t data) {
-    xSemaphoreTake(spimgr::spiMutex, portMAX_DELAY);
+    if (xSemaphoreTake(spimgr::spiMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return;
+    }
 
     SPI.beginTransaction(SPISettings(MPU_SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
     digitalWrite(SD_CS_PIN, HIGH);
@@ -74,7 +78,9 @@ static void writeRegister(uint8_t reg, uint8_t data) {
 }
 
 static int16_t read16(uint8_t regHigh) {
-    xSemaphoreTake(spimgr::spiMutex, portMAX_DELAY);
+    if (xSemaphoreTake(spimgr::spiMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return 0;
+    }
 
     SPI.beginTransaction(SPISettings(MPU_SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
     digitalWrite(SD_CS_PIN, HIGH);
@@ -96,7 +102,10 @@ static int16_t read16(uint8_t regHigh) {
 // siap) -- modul ini tidak lagi memanggil SPI.begin() atau mengatur pin CS.
 bool init() {
     uint8_t whoami = readRegister(REG_WHO_AM_I);
-    if (whoami != 0x71) {
+    Serial.printf("[MPU] WHO_AM_I = 0x%02X\n", whoami);
+    // Terima 0x71 (MPU9250) maupun 0x70 (MPU6500, tanpa magnetometer) —
+    // banyak modul "MPU9250" murah sebenarnya melaporkan 0x70.
+    if (whoami != 0x71 && whoami != 0x70) {
         return false;   // sensor tidak terdeteksi / wiring salah
     }
 

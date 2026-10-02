@@ -11,7 +11,6 @@
 #include "../communication/wifi_manager.h"
 #include "../communication/mqtt_manager.h"
 #include "../storage/sd_logger.h"
-#include "../sync/sync_manager.h"
 #include "esp_task_wdt.h"
 #include <WiFi.h>
 
@@ -41,6 +40,15 @@ volatile bool     g_calibrateAccelRequested = false;
 
 volatile uint32_t g_sequenceCounter = 0;
 volatile uint32_t g_droppedSamples = 0;
+
+// Batch publish state (FR-01)
+// boot_id dari NVS (naik tiap restart), packet_seq increment tiap publish batch
+static const char* NVS_NAMESPACE_BATCH = "batch";
+static const char* NVS_KEY_BOOT_ID = "boot_id";
+static const char* NVS_KEY_PACKET_SEQ = "packet_seq";
+
+uint32_t g_bootId = 1;
+uint32_t g_packetSeq = 0;
 
 // ---------------------------------------------------------------------------
 // Objek pemrosesan (dimiliki sepenuhnya oleh task_data_processing, TIDAK
@@ -73,6 +81,19 @@ static void task_sensor_sampling(void* pv) {
         float dt = (last_us == 0) ? (1.0f / hz) : ((now_us - last_us) / 1000000.0f);
         if (dt > DT_MAX) dt = DT_MAX;
         last_us = now_us;
+
+        // Re-sync RTC dari chip DS3231 1x/detik. Tanpa ini, interpolasi waktu
+        // (micros()) hanya ter-anchor sekali saat boot, lalu drift dari jam
+        // DS3231 asli -> timestamp payload tidak sinkron dengan RTC. I2C
+        // ~200us sekali per detik tidak mengganggu timing sampling 5ms.
+        static unsigned long lastRtcSyncMs = 0;
+        unsigned long msNow = millis();
+        if (msNow - lastRtcSyncMs >= RTC_SYNC_INTERVAL_MS) {
+            if (rtc::isAvailable()) {
+                rtc::sync();
+            }
+            lastRtcSyncMs = msNow;
+        }
 
         MPU9250Data sample;
         mpu9250::readAccelGyro(sample.accel_x, sample.accel_y, sample.accel_z,
@@ -192,18 +213,17 @@ static void task_data_processing(void* pv) {
             pd.accel_scale[1] = accel_scl[1];
             pd.accel_scale[2] = accel_scl[2];
 
-            // Fan-out ke SD Writer & MQTT Publisher (non-blocking; jika
-            // salah satu queue penuh, task tersebut sedang tertinggal —
-            // data yang gagal masuk mqttPublishQueue TIDAK fatal karena
-            // SyncManager akan menyusulkannya dari SD nanti).
-            xQueueSend(sdWriteQueue, &pd, 0);
+            // Fan-out: hanya dorong ke SD Writer jika sesi sedang aktif
+            if (sdlog::isSessionActive()) {
+                xQueueSend(sdWriteQueue, &pd, 0);
+            }
             xQueueSend(mqttPublishQueue, &pd, 0);
         }
     }
 }
 
 // ============================================================================
-// TASK: SD Card Writer (Core 1, priority 8)
+// TASK: SD Card Writer (Core 1, priority 8) — Hanya menulis saat sesi aktif
 // ============================================================================
 static void task_sd_writer(void* pv) {
     esp_task_wdt_add(NULL);
@@ -211,18 +231,19 @@ static void task_sd_writer(void* pv) {
 
     for (;;) {
         if (xQueueReceive(sdWriteQueue, &pd, pdMS_TO_TICKS(100)) == pdTRUE) {
-            SDRecord rec;
-            rec.sequence = pd.sequence;
-            rec.timestamp = pd.timestamp;
-            rec.pitch = pd.pitch;
-            rec.roll = pd.roll;
-            rec.pitch_delta = pd.pitch_delta;
-            rec.roll_delta = pd.roll_delta;
-            rec.rms_vibration = pd.rms_vibration;
-            rec.sampling_rate_hz = pd.sampling_rate_hz;
-            sdlog::writeRecord(rec);
+            if (sdlog::isSessionActive()) {
+                SDRecord rec;
+                rec.sequence = pd.sequence;
+                rec.timestamp = pd.timestamp;
+                rec.pitch = pd.pitch;
+                rec.roll = pd.roll;
+                rec.pitch_delta = pd.pitch_delta;
+                rec.roll_delta = pd.roll_delta;
+                rec.rms_vibration = pd.rms_vibration;
+                rec.sampling_rate_hz = pd.sampling_rate_hz;
+                sdlog::writeRecord(rec);
+            }
         }
-        sdlog::checkRotation();
         sdlog::checkRecovery();
         esp_task_wdt_reset();
     }
@@ -231,38 +252,50 @@ static void task_sd_writer(void* pv) {
 // ============================================================================
 // TASK: MQTT Publisher (Core 1, priority 7)
 // ============================================================================
+// Pengiriman gabungan ke bridge/<node_id>/data per 1 detik:
+// Mengumpulkan 200 ProcessedData (1 detik @ 200Hz). Begitu terkumpul (atau
+// timeout 1s), dikirim sebagai payload tunggal yang berisi summary live
+// dashboard (RMS, tilt Kalman, snapshot XYZ) DAN 200 raw samples ax/ay/az
+// untuk arsip time-series resolusi penuh.
+// ============================================================================
 static void task_mqtt_publisher(void* pv) {
+    // Batch buffer: 200 sampel (1 detik @ 200Hz)
+    static ProcessedData batch[200];
+    static uint16_t batchCount = 0;
+    static TickType_t batchStartTick = 0;
+    static bool batchActive = false;
+
     ProcessedData pd;
-    ProcessedData latest;
-    bool hasLatest = false;
     TickType_t lastPublish = xTaskGetTickCount();
 
     for (;;) {
-        // Kumpulkan sample terbaru yang tersedia (drop yang lebih lama -
-        // untuk payload periodik kita hanya perlu snapshot TERKINI, bukan
-        // seluruh histori; histori lengkap sudah aman di SD/SyncManager).
+        // Drain mqttPublishQueue
         while (xQueueReceive(mqttPublishQueue, &pd, 0) == pdTRUE) {
-            latest = pd;
-            hasLatest = true;
-        }
-
-        uint32_t interval = g_publishIntervalMs;
-        if (interval < MQTT_PUBLISH_INTERVAL_MIN_MS) interval = MQTT_PUBLISH_INTERVAL_MIN_MS;
-        if (interval > MQTT_PUBLISH_INTERVAL_MAX_MS) interval = MQTT_PUBLISH_INTERVAL_MAX_MS;
-
-        if (hasLatest && (xTaskGetTickCount() - lastPublish) >= pdMS_TO_TICKS(interval)) {
-            if (mqttmgr::isConnected()) {
-                if (mqttmgr::publishPeriodic(latest)) {
-                    syncmgr::markAsSent(latest.sequence);
+            if (batchCount < 200) {
+                batch[batchCount++] = pd;
+                if (!batchActive) {
+                    batchActive = true;
+                    batchStartTick = xTaskGetTickCount();
                 }
             }
-            // Jika MQTT tidak connect, TIDAK apa-apa: data sudah aman di SD
-            // (ditulis oleh task_sd_writer secara independen) dan akan
-            // disusulkan oleh Sync Manager begitu MQTT reconnect.
-            lastPublish = xTaskGetTickCount();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        // Kirim payload gabungan setiap 1 detik (atau buffer penuh 200 sampel)
+        TickType_t now = xTaskGetTickCount();
+        uint32_t elapsedMs = pdMS_TO_TICKS(1000);  // 1 detik target
+        if ((batchActive && (batchCount >= 200 || (now - batchStartTick) >= elapsedMs)) &&
+            (now - lastPublish) >= pdMS_TO_TICKS(50)) {  // debounce 50ms
+            if (mqttmgr::isConnected() && batchCount > 0) {
+                mqttmgr::publishPeriodic(batch, batchCount, g_bootId, g_packetSeq);
+                g_packetSeq++;
+                if (g_packetSeq == 0) g_packetSeq = 1;  // rollover protection
+            }
+            batchCount = 0;
+            batchActive = false;
+            lastPublish = now;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));  // Yield ke task lain
     }
 }
 
@@ -320,40 +353,65 @@ static void task_config_handler(void* pv) {
     for (;;) {
         if (xQueueReceive(configCommandQueue, &cmd, portMAX_DELAY) == pdTRUE) {
             switch (cmd.type) {
-                case ConfigCommandType::SET_SAMPLING_RATE:
-                    if (cmd.value >= SAMPLE_RATE_MIN_HZ && cmd.value <= SAMPLE_RATE_MAX_HZ) {
+                case ConfigCommandType::SET_SAMPLING_RATE: {
+                    bool valid = (cmd.value >= SAMPLE_RATE_MIN_HZ && cmd.value <= SAMPLE_RATE_MAX_HZ);
+                    if (valid) {
                         g_samplingRateHz = (uint16_t)cmd.value;
+                        if (xSemaphoreTake(fftBufferMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                            fftBuffer.clear();
+                            xSemaphoreGive(fftBufferMutex);
+                        }
                     }
+                    mqttmgr::publishConfigAck("sampling_rate", cmd.value, g_samplingRateHz, valid ? "applied" : "rejected");
                     break;
-                case ConfigCommandType::SET_PUBLISH_INTERVAL:
-                    if (cmd.value >= MQTT_PUBLISH_INTERVAL_MIN_MS &&
-                        cmd.value <= MQTT_PUBLISH_INTERVAL_MAX_MS) {
+                }
+                case ConfigCommandType::SET_PUBLISH_INTERVAL: {
+                    bool valid = (cmd.value >= MQTT_PUBLISH_INTERVAL_MIN_MS && cmd.value <= MQTT_PUBLISH_INTERVAL_MAX_MS);
+                    if (valid) {
                         g_publishIntervalMs = cmd.value;
                     }
+                    mqttmgr::publishConfigAck("publish_interval", cmd.value, g_publishIntervalMs, valid ? "applied" : "rejected");
                     break;
-                case ConfigCommandType::SET_RAW_WINDOW_INTERVAL:
-                    if (cmd.value >= FFT_SEND_INTERVAL_MIN_MS &&
-                        cmd.value <= FFT_SEND_INTERVAL_MAX_MS) {
+                }
+                case ConfigCommandType::SET_RAW_WINDOW_INTERVAL: {
+                    bool valid = (cmd.value >= FFT_SEND_INTERVAL_MIN_MS && cmd.value <= FFT_SEND_INTERVAL_MAX_MS);
+                    if (valid) {
                         g_fftSendIntervalMs = cmd.value;
                     }
+                    mqttmgr::publishConfigAck("raw_window_interval", cmd.value, g_fftSendIntervalMs, valid ? "applied" : "rejected");
                     break;
-                case ConfigCommandType::SET_SENSITIVITY_GAIN:
-                    if (cmd.value == 1 || cmd.value == 2 || cmd.value == 4 || cmd.value == 8) {
+                }
+                case ConfigCommandType::SET_SENSITIVITY_GAIN: {
+                    bool valid = (cmd.value == 1 || cmd.value == 2 || cmd.value == 4 || cmd.value == 8);
+                    if (valid) {
                         g_sensitivityGain = (uint8_t)cmd.value;
                         mpu9250::setSensitivityGain(g_sensitivityGain);
                     }
+                    mqttmgr::publishConfigAck("sensitivity_gain", cmd.value, g_sensitivityGain, valid ? "applied" : "rejected");
                     break;
+                }
                 case ConfigCommandType::RECALIBRATE:
                     g_recalibrateRequested = true;
+                    mqttmgr::publishConfigAck("recalibrate", 1, 1, "applied");
                     break;
                 case ConfigCommandType::RESTART:
                     g_restartRequested = true;
+                    mqttmgr::publishConfigAck("restart", 1, 1, "applied");
                     break;
                 case ConfigCommandType::REQUEST_STATUS:
                     g_statusRequested = true;
                     break;
                 case ConfigCommandType::CALIBRATE_ACCEL:
                     g_calibrateAccelRequested = true;
+                    mqttmgr::publishConfigAck("calibrate_accel", 1, 1, "applied");
+                    break;
+                case ConfigCommandType::SESSION_START:
+                    sdlog::startSession(cmd.value);
+                    mqttmgr::publishConfigAck("session_start", cmd.value, cmd.value, "applied");
+                    break;
+                case ConfigCommandType::SESSION_STOP:
+                    sdlog::stopSession();
+                    mqttmgr::publishConfigAck("session_stop", 0, 0, "applied");
                     break;
             }
         }
@@ -374,25 +432,6 @@ static void task_config_handler(void* pv) {
                                         ? (100.0f * g_droppedSamples / (float)(g_sequenceCounter + 1))
                                         : 0.0f);
         }
-    }
-}
-
-// ============================================================================
-// TASK: Sync Manager (Core 1, priority 3)
-// ============================================================================
-static void task_sync_manager(void* pv) {
-    bool wasConnected = false;
-
-    for (;;) {
-        bool nowConnected = mqttmgr::isConnected();
-        if (nowConnected && !wasConnected) {
-            // Transisi offline -> online terdeteksi (redundan dengan
-            // pemanggilan di mqtt_manager::loop(), tapi task ini juga
-            // mengawasi secara independen sebagai safety-net low-priority).
-            syncmgr::syncAfterReconnect();
-        }
-        wasConnected = nowConnected;
-        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
@@ -459,9 +498,6 @@ void createAll() {
 
     xTaskCreatePinnedToCore(task_config_handler, "config_handler",
         STACK_CONFIG_HANDLER, nullptr, PRIO_CONFIG_HANDLER, nullptr, CORE_CONFIG_HANDLER);
-
-    xTaskCreatePinnedToCore(task_sync_manager, "sync_manager",
-        STACK_SYNC_MANAGER, nullptr, PRIO_SYNC_MANAGER, nullptr, CORE_SYNC_MANAGER);
 
     xTaskCreatePinnedToCore(task_serial_debug, "serial_debug",
         STACK_SERIAL_DEBUG, nullptr, PRIO_SERIAL_DEBUG, nullptr, CORE_SERIAL_DEBUG);

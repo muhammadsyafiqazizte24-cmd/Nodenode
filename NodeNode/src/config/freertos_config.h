@@ -19,7 +19,6 @@
 #define PRIO_WIFI_MQTT_RECONNECT     6   // Core 1 — jaga koneksi
 #define PRIO_FFT_BUFFER_SENDER       5   // Core 1 — kirim buffer FFT
 #define PRIO_CONFIG_HANDLER          4   // Core 1 — terima perintah remote
-#define PRIO_SYNC_MANAGER            3   // Core 1 — sinkronisasi data
 #define PRIO_SERIAL_DEBUG            2   // Core 1 — monitoring
 
 // ---------------------------------------------------------------------------
@@ -35,7 +34,6 @@
 #define CORE_WIFI_RECONNECT 1
 #define CORE_FFT_SENDER     1
 #define CORE_CONFIG_HANDLER 1
-#define CORE_SYNC_MANAGER   1
 #define CORE_SERIAL_DEBUG   1
 
 // ---------------------------------------------------------------------------
@@ -51,7 +49,6 @@
 #define STACK_WIFI_RECONNECT       4096
 #define STACK_FFT_SENDER           8192
 #define STACK_CONFIG_HANDLER       4096
-#define STACK_SYNC_MANAGER         4096
 #define STACK_SERIAL_DEBUG         2048
 
 // ---------------------------------------------------------------------------
@@ -74,8 +71,7 @@
 //  FFT Buffer Send        10-30s (configurable)      <1s              1
 //  WiFi/MQTT Reconnect    5s check                   -                1
 //  Config Handler         event-driven (MQTT cb)     -                1
-//  Sync Manager           setelah reconnect          low priority     1
-
+// 
 // ---------------------------------------------------------------------------
 // PERFORMANCE ESTIMATE (analisis, lihat juga README.md)
 // ---------------------------------------------------------------------------

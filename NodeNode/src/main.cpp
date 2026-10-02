@@ -85,8 +85,6 @@
 #include "communication/mqtt_manager.h"
 
 #include "storage/sd_logger.h"
-#include "sync/sync_manager.h"
-
 #include "scheduler/task_manager.h"
 
 void setup() {
@@ -143,9 +141,7 @@ void setup() {
         Serial.println("WARNING: SD Card tidak terdeteksi - berjalan dalam mode degraded "
                         "(logging lokal nonaktif, MQTT tetap berjalan).");
     } else {
-        Serial.println("SD Card OK.");
-        uint32_t lastSeq = syncmgr::loadCheckpoint();
-        Serial.printf("Checkpoint sync terakhir: sequence=%lu\n", lastSeq);
+        Serial.println("SD Card OK. Menunggu sesi.");
     }
 
     // ---- WiFi & MQTT (non-blocking init; koneksi aktual ditangani task) ----

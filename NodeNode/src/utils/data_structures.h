@@ -74,7 +74,9 @@ enum class ConfigCommandType : uint8_t {
     RECALIBRATE,
     RESTART,
     REQUEST_STATUS,
-    CALIBRATE_ACCEL
+    CALIBRATE_ACCEL,
+    SESSION_START,
+    SESSION_STOP
 };
 
 struct ConfigCommand {

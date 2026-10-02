@@ -60,6 +60,12 @@ extern volatile uint32_t g_sequenceCounter;   // sequence number global, increme
 extern volatile uint32_t g_droppedSamples;    // sample yang gagal masuk queue (queue penuh)
 
 // ---------------------------------------------------------------------------
+// BATCH PUBLISH STATE (untuk FR-01: batch time-series)
+// ---------------------------------------------------------------------------
+extern uint32_t g_bootId;             // identitas boot (naik tiap restart)
+extern uint32_t g_packetSeq;          // nomor batch per boot (increment tiap publish)
+
+// ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
 namespace taskmgr {

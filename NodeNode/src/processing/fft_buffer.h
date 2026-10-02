@@ -24,6 +24,14 @@ public:
         memset(buffer, 0, sizeof(buffer));
     }
 
+    void clear() {
+        write_index = 0;
+        is_ready = false;
+        window_start_ms = 0;
+        window_end_ms = 0;
+        memset(buffer, 0, sizeof(buffer));
+    }
+
     // Tambahkan satu sample (magnitude accel Z, sudah dikurangi gravitasi
     // dilakukan oleh caller jika diperlukan — modul ini murni ring buffer).
     // timestamp_ms adalah epoch millis saat sample diambil.

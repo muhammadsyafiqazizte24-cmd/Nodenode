@@ -25,6 +25,9 @@ extern SemaphoreHandle_t i2cMutex;
 // kehilangan daya (waktu tidak valid, perlu di-set ulang lewat setTime()).
 bool init();
 
+// Cek apakah chip DS3231 terdeteksi dan berfungsi di bus I2C
+bool isAvailable();
+
 // Set waktu RTC secara manual (dipanggil dari config handler/serial).
 void setTime(uint8_t hh, uint8_t mm, uint8_t ss);
 

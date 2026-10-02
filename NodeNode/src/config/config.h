@@ -96,22 +96,19 @@
 #define FFT_SEND_INTERVAL_MAX_MS      30000UL
 
 // ---------------------------------------------------------------------------
-// MQTT publish periodik (pitch/roll/rms)
+// MQTT publish periodik (pitch/roll/rms + 200 raw samples)
 // ---------------------------------------------------------------------------
-#define MQTT_PUBLISH_INTERVAL_DEFAULT_MS  500UL
-#define MQTT_PUBLISH_INTERVAL_MIN_MS      500UL
+#define MQTT_PUBLISH_INTERVAL_DEFAULT_MS  1000UL
+#define MQTT_PUBLISH_INTERVAL_MIN_MS      1000UL
 #define MQTT_PUBLISH_INTERVAL_MAX_MS      10000UL
 
 // ---------------------------------------------------------------------------
-// SD Card logging
+// SD Card logging (berbasis sesi pengujian)
 // ---------------------------------------------------------------------------
 #define SD_WRITE_BATCH_SIZE     10       // flush setiap 10 sample terkumpul
 #define SD_FLUSH_INTERVAL_MS    500UL    // atau setiap 500ms, mana lebih dulu
-#define SD_FILE_ROTATE_INTERVAL_MS  (60UL * 60UL * 1000UL)  // 1 jam
-#define SD_FILE_ROTATE_MAX_BYTES    (10UL * 1024UL * 1024UL) // 10MB
-#define SD_RETRY_INTERVAL_MS        30000UL                   // re-init tiap 30 dtk saat SD down
-#define SD_LOG_DIR               "/shm_logs"
-#define SD_CHECKPOINT_FILE       "/shm_logs/checkpoint.dat"
+#define SD_RETRY_INTERVAL_MS    30000UL  // re-init tiap 30 dtk saat SD down
+#define SD_LOG_DIR              "/shm_logs/" NODE_ID
 
 // ---------------------------------------------------------------------------
 // WiFi reconnect

@@ -26,9 +26,10 @@ extern char mqttBroker[];   // dipopulate oleh WiFiManager, dipakai mqtt_manager
 // ---------------------------------------------------------------------------
 // Topics — PUBLISH (Node -> Backend)
 // ---------------------------------------------------------------------------
-#define TOPIC_DATA_PERIODIC     "bridge/" NODE_ID "/data"        // pitch/roll/rms tiap 1s
+#define TOPIC_DATA_PERIODIC     "bridge/" NODE_ID "/data"        // pitch/roll/rms + 200 raw samples tiap 1s
 #define TOPIC_FFT_BUFFER        "bridge/" NODE_ID "/raw"         // raw window tiap 10-30s
 #define TOPIC_STATUS             "bridge/" NODE_ID "/status"      // balasan request_status
+#define TOPIC_CONFIG_ACK         "bridge/" NODE_ID "/config_ack"  // konfirmasi konfigurasi (FR-04)
 #define TOPIC_LWT                "bridge/" NODE_ID "/lwt"         // last-will (offline notice)
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,8 @@ extern char mqttBroker[];   // dipopulate oleh WiFiManager, dipakai mqtt_manager
 #define TOPIC_CMD_CALIBRATE_ACCEL      "bridge/" NODE_ID "/cmd/calibrate_accel"
 #define TOPIC_CMD_RESTART              "bridge/" NODE_ID "/cmd/restart"
 #define TOPIC_CMD_REQUEST_STATUS       "bridge/" NODE_ID "/cmd/request_status"
+#define TOPIC_CMD_SESSION_START        "bridge/" NODE_ID "/cmd/session_start"
+#define TOPIC_CMD_SESSION_STOP         "bridge/" NODE_ID "/cmd/session_stop"
 
 // Wildcard subscribe tunggal untuk semua command node ini
 #define TOPIC_CMD_WILDCARD              "bridge/" NODE_ID "/cmd/#"

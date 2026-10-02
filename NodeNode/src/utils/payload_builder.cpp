@@ -12,60 +12,81 @@ static void setTimestamp(JsonDocument& doc) {
     doc["timestamp"] = ts;
 }
 
-size_t buildPeriodicPayload(const ProcessedData& data, bool wifi_connected,
-                             char* out, size_t out_size) {
-    JsonDocument doc;
+size_t buildPeriodicPayload(const ProcessedData* batch, uint16_t batch_count,
+                             uint32_t boot_id, uint32_t packet_seq,
+                             bool wifi_connected, char* out, size_t out_size) {
+    if (batch == nullptr || batch_count == 0) return 0;
 
+    JsonDocument doc;
+    const ProcessedData& latest = batch[batch_count - 1];
+
+    doc["schema_version"] = 1;
     doc["node_id"] = NODE_ID;
     setTimestamp(doc);
-    doc["sampling_rate_hz"] = data.sampling_rate_hz;
+    doc["sampling_rate_hz"] = latest.sampling_rate_hz;
     doc["connection_status"] = wifi_connected ? "online" : "offline";
 
+    // 1. Live dashboard fields (RMS getaran, Tilt Kalman delta, snapshot XYZ)
     JsonObject vib = doc["vibration"].to<JsonObject>();
-    vib["rms"] = data.rms_vibration;
+    vib["rms"] = latest.rms_vibration;
 
     JsonObject tilt = doc["tilt"].to<JsonObject>();
-    tilt["pitch"] = data.pitch;
-    tilt["roll"] = data.roll;
-    tilt["pitch_delta"] = data.pitch_delta;
-    tilt["roll_delta"] = data.roll_delta;
+    tilt["pitch"] = latest.pitch;
+    tilt["roll"] = latest.roll;
+    tilt["pitch_delta"] = latest.pitch_delta;
+    tilt["roll_delta"] = latest.roll_delta;
 
     JsonObject mag = doc["magnetometer"].to<JsonObject>();
     mag["mag_x"] = 0.0f;
     mag["mag_y"] = 0.0f;
     mag["mag_z"] = 0.0f;
 
-    // Raw accel/gyro snapshot untuk dashboard "Raw Sensor Data"
+    // Snapshot raw sensor data terkini untuk kartu dashboard Home
     JsonObject accel = doc["accelerometer"].to<JsonObject>();
-    accel["x"] = data.accel_x;
-    accel["y"] = data.accel_y;
-    accel["z"] = data.accel_z;
+    accel["x"] = latest.accel_x;
+    accel["y"] = latest.accel_y;
+    accel["z"] = latest.accel_z;
 
-    // Calibrated accel (jika kalibrasi tersedia)
-    if (data.accel_calibrated) {
+    if (latest.accel_calibrated) {
         JsonObject accel_cal = doc["accelerometer_calibrated"].to<JsonObject>();
-        accel_cal["x"] = data.accel_x_cal;
-        accel_cal["y"] = data.accel_y_cal;
-        accel_cal["z"] = data.accel_z_cal;
+        accel_cal["x"] = latest.accel_x_cal;
+        accel_cal["y"] = latest.accel_y_cal;
+        accel_cal["z"] = latest.accel_z_cal;
     }
 
     JsonObject gyro = doc["gyroscope"].to<JsonObject>();
-    gyro["x"] = data.gyro_x;
-    gyro["y"] = data.gyro_y;
-    gyro["z"] = data.gyro_z;
+    gyro["x"] = latest.gyro_x;
+    gyro["y"] = latest.gyro_y;
+    gyro["z"] = latest.gyro_z;
 
-    // Calibration info
-    if (data.calibration_version > 0) {
+    if (latest.calibration_version > 0) {
         JsonObject cal = doc["calibration"].to<JsonObject>();
-        cal["version"] = data.calibration_version;
+        cal["version"] = latest.calibration_version;
         JsonArray off = cal["accel_offset"].to<JsonArray>();
-        off.add(data.accel_offset[0]);
-        off.add(data.accel_offset[1]);
-        off.add(data.accel_offset[2]);
+        off.add(latest.accel_offset[0]);
+        off.add(latest.accel_offset[1]);
+        off.add(latest.accel_offset[2]);
         JsonArray scl = cal["accel_scale"].to<JsonArray>();
-        scl.add(data.accel_scale[0]);
-        scl.add(data.accel_scale[1]);
-        scl.add(data.accel_scale[2]);
+        scl.add(latest.accel_scale[0]);
+        scl.add(latest.accel_scale[1]);
+        scl.add(latest.accel_scale[2]);
+    }
+
+    // 2. Raw time-series 200Hz archive (semua sampel utuh per 1 detik)
+    doc["boot_id"] = boot_id;
+    doc["packet_seq"] = packet_seq;
+    doc["first_sample_seq"] = batch[0].sequence;
+    doc["sample_count"] = batch_count;
+    doc["t0_us"] = batch[0].timestamp * 1000000ULL;
+    doc["dt_us"] = 5000;
+
+    JsonArray arrAx = doc["ax"].to<JsonArray>();
+    JsonArray arrAy = doc["ay"].to<JsonArray>();
+    JsonArray arrAz = doc["az"].to<JsonArray>();
+    for (uint16_t i = 0; i < batch_count; i++) {
+        arrAx.add(batch[i].accel_x);
+        arrAy.add(batch[i].accel_y);
+        arrAz.add(batch[i].accel_z);
     }
 
     size_t len = serializeJson(doc, out, out_size);

@@ -13,17 +13,12 @@
 
 namespace payload {
 
-// Payload periodik (dikirim tiap 1 detik / sesuai publish_interval):
-// { node_id, timestamp, sampling_rate_hz, connection_status, pitch, roll,
-//   pitch_delta, roll_delta, rms_vibration,
-//   magnetometer:{mag_x,mag_y,mag_z},
-//   accelerometer:{x,y,z}, accelerometer_calibrated:{x,y,z}, gyroscope:{x,y,z},
-//   calibration:{version,accel_offset:[],accel_scale:[]} }
-// Hasil ditulis ke `out` (buffer caller-provided), return panjang string
-// (atau 0 jika buffer kurang besar) — TANPA alokasi heap dinamis supaya
-// aman dipanggil berulang dari task MQTT Publisher 24/7.
-size_t buildPeriodicPayload(const ProcessedData& data, bool wifi_connected,
-                             char* out, size_t out_size);
+// Payload periodik gabungan ke bridge/<node_id>/data (dikirim tiap 1 detik):
+// Memuat summary live dashboard (RMS, tilt Kalman, snapshot XYZ)
+// DAN 200 raw samples ax/ay/az (@200Hz) dalam satu JSON tunggal.
+size_t buildPeriodicPayload(const ProcessedData* batch, uint16_t batch_count,
+                             uint32_t boot_id, uint32_t packet_seq,
+                             bool wifi_connected, char* out, size_t out_size);
 
 // Payload FFT buffer (dikirim tiap 10-30 detik):
 // { node_id, timestamp, raw_accel:[...], window_size, sampling_rate_hz,
