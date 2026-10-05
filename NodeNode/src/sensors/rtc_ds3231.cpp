@@ -1,5 +1,6 @@
 #include "rtc_ds3231.h"
 #include <Wire.h>
+#include <WiFi.h>
 #include <time.h>
 #include "../config/config.h"
 
@@ -90,10 +91,26 @@ void setDate(uint16_t year, uint8_t month, uint8_t day) {
 }
 
 bool syncNtp() {
+    // Diagnostik: alamat & DNS yang benar-benar diterima node dari DHCP/router.
+    Serial.printf("[NTP] IP=%s GW=%s DNS0=%s DNS1=%s\n",
+                  WiFi.localIP().toString().c_str(),
+                  WiFi.gatewayIP().toString().c_str(),
+                  WiFi.dnsIP(0).toString().c_str(),
+                  WiFi.dnsIP(1).toString().c_str());
+
     configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER);
 
     struct tm t;
     if (!getLocalTime(&t, NTP_SYNC_TIMEOUT_MS)) {
+        // Bedakan "DNS tidak jalan" (request NTP tak pernah terkirim) dari
+        // "UDP 123 diblokir / WAN belum siap" (DNS jalan, tapi tak ada balasan).
+        IPAddress ntp_ip;
+        bool resolved = WiFi.hostByName(NTP_SERVER, ntp_ip);
+        Serial.printf("[NTP] GAGAL: resolve %s -> %s\n", NTP_SERVER,
+                      resolved ? ntp_ip.toString().c_str() : "GAGAL (DNS tidak jalan)");
+        if (resolved) {
+            Serial.println("[NTP] DNS OK -> curiga UDP 123 diblokir atau WAN belum siap");
+        }
         return false;
     }
 

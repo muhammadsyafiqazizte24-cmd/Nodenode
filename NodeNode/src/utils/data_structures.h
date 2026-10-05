@@ -32,6 +32,9 @@ struct MPU9250Data {
     uint32_t sequence;
     // Epoch millis untuk timestamp presisi tinggi (FDD sync)
     uint64_t epoch_ms;
+    // Waktu monotonik esp_timer (mikrodetik sejak boot) saat sampel diambil.
+    // Mulus (tidak melompat), dipakai server untuk menyejajarkan kedua node.
+    uint64_t t_us;
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +63,8 @@ struct ProcessedData {
     uint8_t calibration_version;
     float accel_offset[3];
     float accel_scale[3];
+    // Waktu monotonik esp_timer (us sejak boot) dari MPU9250Data.t_us
+    uint64_t t_us;
 };
 
 // ---------------------------------------------------------------------------

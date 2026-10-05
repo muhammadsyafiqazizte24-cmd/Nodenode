@@ -12,6 +12,7 @@
 #include "../communication/mqtt_manager.h"
 #include "../storage/sd_logger.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include <WiFi.h>
 
 // ============================================================================
@@ -96,6 +97,8 @@ static void task_sensor_sampling(void* pv) {
         }
 
         MPU9250Data sample;
+        // Cap waktu monotonik tepat sebelum pembacaan sensor (bukan dari RTC).
+        sample.t_us = (uint64_t)esp_timer_get_time();
         mpu9250::readAccelGyro(sample.accel_x, sample.accel_y, sample.accel_z,
                                 sample.gyro_x, sample.gyro_y, sample.gyro_z);
         mpu9250::readMagnetometer(sample.mag_x, sample.mag_y, sample.mag_z);
@@ -186,6 +189,7 @@ static void task_data_processing(void* pv) {
             ProcessedData pd;
             pd.sequence = sample.sequence;
             pd.timestamp = sample.timestamp;
+            pd.t_us = sample.t_us;
             pd.pitch = pitch;
             pd.roll = roll;
             pd.pitch_delta = pitch_delta;

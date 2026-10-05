@@ -193,6 +193,8 @@ void init() {
     }
 
     Serial.printf("[WiFi] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    // Matikan modem sleep: sleep WiFi menambah delay/jitter paket (MQTT & NTP).
+    WiFi.setSleep(false);
     saveConfigCallback();
 
     // Sinkronisasi RTC ke UTC via NTP (sekali per boot; DS3231 lalu menjaga
@@ -212,10 +214,14 @@ bool isConnected() {
 }
 
 void checkAndReconnect() {
+    // Setelah reconnect, pastikan modem sleep tetap mati.
+    static bool sleepOff = false;
     if (isConnected()) {
+        if (!sleepOff) { WiFi.setSleep(false); sleepOff = true; }
         xEventGroupSetBits(netEventGroup, WIFI_CONNECTED_BIT);
         return;
     }
+    sleepOff = false;
 
     xEventGroupClearBits(netEventGroup, WIFI_CONNECTED_BIT | MQTT_CONNECTED_BIT);
 

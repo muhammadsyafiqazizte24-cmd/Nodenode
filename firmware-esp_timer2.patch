@@ -1,0 +1,107 @@
+diff --git a/NodeNode/src/communication/wifi_manager.cpp b/NodeNode/src/communication/wifi_manager.cpp
+index 75ef7ac..e9a6539 100644
+--- a/NodeNode/src/communication/wifi_manager.cpp
++++ b/NodeNode/src/communication/wifi_manager.cpp
+@@ -193,6 +193,8 @@ void init() {
+     }
+ 
+     Serial.printf("[WiFi] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
++    // Matikan modem sleep: sleep WiFi menambah delay/jitter paket (MQTT & NTP).
++    WiFi.setSleep(false);
+     saveConfigCallback();
+ 
+     // Sinkronisasi RTC ke UTC via NTP (sekali per boot; DS3231 lalu menjaga
+@@ -212,10 +214,14 @@ bool isConnected() {
+ }
+ 
+ void checkAndReconnect() {
++    // Setelah reconnect, pastikan modem sleep tetap mati.
++    static bool sleepOff = false;
+     if (isConnected()) {
++        if (!sleepOff) { WiFi.setSleep(false); sleepOff = true; }
+         xEventGroupSetBits(netEventGroup, WIFI_CONNECTED_BIT);
+         return;
+     }
++    sleepOff = false;
+ 
+     xEventGroupClearBits(netEventGroup, WIFI_CONNECTED_BIT | MQTT_CONNECTED_BIT);
+ 
+diff --git a/NodeNode/src/scheduler/task_manager.cpp b/NodeNode/src/scheduler/task_manager.cpp
+index ced69f1..d32add7 100644
+--- a/NodeNode/src/scheduler/task_manager.cpp
++++ b/NodeNode/src/scheduler/task_manager.cpp
+@@ -12,6 +12,7 @@
+ #include "../communication/mqtt_manager.h"
+ #include "../storage/sd_logger.h"
+ #include "esp_task_wdt.h"
++#include "esp_timer.h"
+ #include <WiFi.h>
+ 
+ // ============================================================================
+@@ -96,6 +97,8 @@ static void task_sensor_sampling(void* pv) {
+         }
+ 
+         MPU9250Data sample;
++        // Cap waktu monotonik tepat sebelum pembacaan sensor (bukan dari RTC).
++        sample.t_us = (uint64_t)esp_timer_get_time();
+         mpu9250::readAccelGyro(sample.accel_x, sample.accel_y, sample.accel_z,
+                                 sample.gyro_x, sample.gyro_y, sample.gyro_z);
+         mpu9250::readMagnetometer(sample.mag_x, sample.mag_y, sample.mag_z);
+@@ -186,6 +189,7 @@ static void task_data_processing(void* pv) {
+             ProcessedData pd;
+             pd.sequence = sample.sequence;
+             pd.timestamp = sample.timestamp;
++            pd.t_us = sample.t_us;
+             pd.pitch = pitch;
+             pd.roll = roll;
+             pd.pitch_delta = pitch_delta;
+diff --git a/NodeNode/src/utils/data_structures.h b/NodeNode/src/utils/data_structures.h
+index 062bd30..69a7d42 100644
+--- a/NodeNode/src/utils/data_structures.h
++++ b/NodeNode/src/utils/data_structures.h
+@@ -32,6 +32,9 @@ struct MPU9250Data {
+     uint32_t sequence;
+     // Epoch millis untuk timestamp presisi tinggi (FDD sync)
+     uint64_t epoch_ms;
++    // Waktu monotonik esp_timer (mikrodetik sejak boot) saat sampel diambil.
++    // Mulus (tidak melompat), dipakai server untuk menyejajarkan kedua node.
++    uint64_t t_us;
+ };
+ 
+ // ---------------------------------------------------------------------------
+@@ -60,6 +63,8 @@ struct ProcessedData {
+     uint8_t calibration_version;
+     float accel_offset[3];
+     float accel_scale[3];
++    // Waktu monotonik esp_timer (us sejak boot) dari MPU9250Data.t_us
++    uint64_t t_us;
+ };
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/NodeNode/src/utils/payload_builder.cpp b/NodeNode/src/utils/payload_builder.cpp
+index 356cfc9..f220a96 100644
+--- a/NodeNode/src/utils/payload_builder.cpp
++++ b/NodeNode/src/utils/payload_builder.cpp
+@@ -77,8 +77,21 @@ size_t buildPeriodicPayload(const ProcessedData* batch, uint16_t batch_count,
+     doc["packet_seq"] = packet_seq;
+     doc["first_sample_seq"] = batch[0].sequence;
+     doc["sample_count"] = batch_count;
++    // t0_us: epoch-us dari detik RTC (resolusi 1 detik, kasar). TIDAK untuk menyejajarkan node.
+     doc["t0_us"] = batch[0].timestamp * 1000000ULL;
+-    doc["dt_us"] = 5000;
++    // dt_us mengikuti laju sampling aktif (bisa diubah 50..200 Hz lewat remote config).
++    {
++        uint16_t hz = latest.sampling_rate_hz ? latest.sampling_rate_hz : 200;
++        doc["dt_us"] = 1000000UL / hz;
++    }
++    // mono_*: waktu monotonik esp_timer, mikrodetik SEJAK BOOT (bukan epoch). Basis waktu
++    // berbeda dengan t0_us; jangan dicampur. Selisih (mono_last - mono_first) / (n - 1)
++    // = dt nyata antar sampel.
++    doc["mono_first_us"] = batch[0].t_us;
++    doc["mono_last_us"] = batch[batch_count - 1].t_us;
++    // Nomor urut sampel terakhir. Jika (last - first) != (sample_count - 1),
++    // ada sampel yang terbuang (queue penuh) di tengah batch ini.
++    doc["last_sample_seq"] = batch[batch_count - 1].sequence;
+ 
+     JsonArray arrAx = doc["ax"].to<JsonArray>();
+     JsonArray arrAy = doc["ay"].to<JsonArray>();

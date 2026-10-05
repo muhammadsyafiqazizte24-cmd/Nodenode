@@ -77,8 +77,21 @@ size_t buildPeriodicPayload(const ProcessedData* batch, uint16_t batch_count,
     doc["packet_seq"] = packet_seq;
     doc["first_sample_seq"] = batch[0].sequence;
     doc["sample_count"] = batch_count;
+    // t0_us: epoch-us dari detik RTC (resolusi 1 detik, kasar). TIDAK untuk menyejajarkan node.
     doc["t0_us"] = batch[0].timestamp * 1000000ULL;
-    doc["dt_us"] = 5000;
+    // dt_us mengikuti laju sampling aktif (bisa diubah 50..200 Hz lewat remote config).
+    {
+        uint16_t hz = latest.sampling_rate_hz ? latest.sampling_rate_hz : 200;
+        doc["dt_us"] = 1000000UL / hz;
+    }
+    // mono_*: waktu monotonik esp_timer, mikrodetik SEJAK BOOT (bukan epoch). Basis waktu
+    // berbeda dengan t0_us; jangan dicampur. Selisih (mono_last - mono_first) / (n - 1)
+    // = dt nyata antar sampel.
+    doc["mono_first_us"] = batch[0].t_us;
+    doc["mono_last_us"] = batch[batch_count - 1].t_us;
+    // Nomor urut sampel terakhir. Jika (last - first) != (sample_count - 1),
+    // ada sampel yang terbuang (queue penuh) di tengah batch ini.
+    doc["last_sample_seq"] = batch[batch_count - 1].sequence;
 
     JsonArray arrAx = doc["ax"].to<JsonArray>();
     JsonArray arrAy = doc["ay"].to<JsonArray>();
